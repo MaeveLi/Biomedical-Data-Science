@@ -1,0 +1,686 @@
+---
+title: |
+  <center> Assignment 1 for Biomedical Data Science <center>
+author: "Maeve Li (Minqing Li) s2167017"
+geometry: "left=2cm,right=2cm,top=2cm,bottom=2cm"
+output:
+  pdf_document: default
+  html_document:
+    df_print: paged
+  word_document: default
+---
+
+```{r}
+# load the libraries used in this file
+library(data.table)
+library(dplyr)
+library(pROC)
+library(caret)
+```
+
+## Problem 1 (25 points)
+
+Files longegfr1.csv and longegfr2.csv (available on Learn) contain information regarding a
+longitudinal dataset containing records on 250 patients. For each subject, eGFR (estimated
+glomerular filtration rate, a measure of kidney function) was collected at irregularly spaced
+time points: variable “fu.years” contains the follow-up time (that is, the distance from baseline
+to the date when each eGFR measurement was taken, expressed in years).
+
+
+### Problem 1.a (4 points)
+
+Convert the files to data tables and merge in an appropriate way into a single data table,
+then order the observations according to subject identifier and follow-up time. 
+
+Answer:  
+We first read the data and convert them into data.tables using the data.table function. And we can preview the two datasets to see what variables(columns) they contain and how we can merge them accordingly.
+
+```{r}
+# read in the data and convert
+longegfr1 <- read.table("E:/Mae/EDIN/Biomedical Data Science/1_longegfr1.csv",
+                        header = T, sep = ",", stringsAsFactors = F)
+longegfr2 <- read.table("E:/Mae/EDIN/Biomedical Data Science/1_longegfr2.csv",
+                        header = T, sep = ",", stringsAsFactors = F)
+longegfr1.dt <- data.table(longegfr1)
+longegfr2.dt <- data.table(longegfr2)
+
+# preview the data
+head(longegfr1.dt)
+head(longegfr2.dt)
+```
+
+First note that the column "id" in longegfr1 is called differently as "ID" in longegfr2. longegfr1 has two columns which are not present in longegfr2 - "sex" and "baseline.age", while longegfr2 has one outstanding column - "egfr". The two datasets both have the column "fu.years". Since the id column has duplicate values, we need to merge the two datasets according to the id column and the fu.years column.
+
+```{r}
+# merge the two datasets according to two columns
+longegfr.dt <- merge(longegfr1.dt, longegfr2.dt, by.x=c("id","fu.years"), 
+                     by.y=c("ID","fu.years"), all=TRUE)
+
+# order the dataset by id and fu.years
+longegfr.dt <- longegfr.dt[order(id, fu.years, decreasing=FALSE),]
+
+head(longegfr.dt)
+```
+
+### Problem 1.b (6 points)
+
+Compute the average eGFR and length of follow-up for each patient, then tabulate the
+number of patients with average eGFR in the following ranges: (0, 15], (15, 30], (30, 60], (60,
+90], (90, max(eGFR)). Count and report the number of patients with missing average eGFR. 
+
+Answer:
+Notice that patient id is an integer variable so we need to convert it to a factor variable before analyzing the data.
+
+```{r}
+# Factorizing patient id
+longegfr.dt$id <- longegfr.dt[, as.factor(id)]
+
+# Compute the average eGFR 
+egfrmean.dt <- longegfr.dt %>% copy() %>% 
+  .[, mean(egfr), by=id] %>% 
+  setnames(., "V1", "egfr.mean")
+egfrmean.dt
+
+# Compute the length of fu.years: the largest time point represent the length of follow-up
+fulength.dt <- longegfr.dt %>% copy() %>% 
+  .[, max(fu.years), by=id]  %>% 
+  setnames(., "V1", "fu.length")
+fulength.dt
+```
+
+```{r}
+# tabulate the data by creating bins
+bins <- c(0, 15, 30, 60, 90, max(longegfr.dt$egfr, na.rm=T))
+table(cut(egfrmean.dt$egfr.mean,bins))
+```
+
+```{r}
+# Count the number of missing average efgr
+summary(is.na(egfrmean.dt$egfr.mean))
+```
+From the output we can see that there are 39 patients with missing average eFGR.
+
+### Problem 1.c (6 points)
+
+For patients with average eGFR in the (90,max(eGFR)) range, collect in a data table (or tibble) their identifier,
+sex, age at baseline, average eGFR, time of last eGFR reading and number of eGFR measurements taken. 
+
+Answer:
+```{r}
+longegfr_large.dt <- longegfr.dt %>% copy() %>% 
+  .[, average.efgr:= mean(egfr), by=id] %>%  # average eGFR
+  .[, lastread.egfr:= max(fu.years), by=id] %>% # time of last eGFR reading
+  .[, num.egfr:= length(fu.years), by=id] %>% # number of eGFR measurements taken
+  .[average.efgr > 90,] %>% # keep the rows with average eGFR in the (90,max(eGFR)) range
+  .[,egfr:= NULL] %>%
+  .[,fu.years:= NULL] %>% # remove these two columns
+  unique(.,by="id") # leave unique rows
+
+longegfr_large.dt
+```
+
+
+### Problem 1.d (9 points)
+
+For patients 3, 37, 162 and 223:
+* Plot the patient’s eGFR measurements as a function of time.
+* Fit a linear regression model and add the regression line to the plot.
+* Report the 95% confidence interval for the regression coefficients of the fitted model.
+* Using a different colour, plot a second regression line computed after removing the
+extreme eGFR values (one each of the highest and the lowest value). 
+
+The plots should be appropriately labelled and the results should be accompanied by some explanation as you would communicate it to a colleague with a medical rather than statistical background.
+
+Answer:
+```{r}
+egfr.regplots <- function(i){
+  
+  # A function that uses the patient id i as input and fits two linear regression models
+  # of eGFR conditioning on time. It outputs a scatterplot with two regression lines
+  # and outputs the first model's coefficients' 95% confidence interval.
+  
+  # select the given id's rows
+  subset <- longegfr.dt[id==i,] 
+  
+  # fit the first linear model and output the coefficients' 95% CIs
+  lm.egfr <- lm(subset$egfr ~ subset$fu.years)
+  print(confint(lm.egfr))
+  
+  # remove the largest and the smallest value of eGFR in this subset
+  newsub <- subset[order(egfr, decreasing = F)] %>% 
+    slice_tail(., n=-1) %>%  # remove the smallest
+    slice_head(., n=-1)      # remove the largest
+  
+  #fit a new regression model
+  lm2.egfr <- lm(newsub$egfr ~ newsub$fu.years)
+  
+  # Plot the scatterplots and add the two regression lines
+  plot(subset$fu.years,subset$egfr, main=paste0("Scatterplot of Patient ",i),
+       xlab="year", ylab="eGFR")
+  abline(lm.egfr, col="red", lwd=2)
+  abline(lm2.egfr, col="blue", lwd=2)
+  legend(0, max(subset$egfr)-2, legend = c("1st regression", "2nd regression"),
+       col = c("red", "blue"), lty = c(1,1), lwd = c(2,2), bty ="n")
+}
+```
+
+```{r}
+egfr.regplots(3)
+```
+For patient 3, the confidence interval for the coefficient of fu.years includes 0 so we cannot reject the null hypothesis that the coefficient for fu.year is zero. From the graph we can see that in general eGFR increases with time, but the second model with extreme values removed is less steep, which means that for each unit increase in year, eGFR increases less than the first model.
+
+```{r}
+egfr.regplots(37)
+```
+For patient 37, the confidence interval for the coefficient of fu.years also includes 0 so we cannot reject the null hypothesis. From the graph we can see that in the first model eGFR decreases as time went on. However, in the second model with extreme values removed, eGFR increases as time went on, which is the reverse of the result in model 1. It may be safe to say here that for patient 37, eGFR has no obvious pattern over time.
+
+```{r}
+egfr.regplots(162)
+```
+For patient 162, 0 does not fall into the confidence interval for the coefficient of fu.years so we can reject the null hypothesis and say that there is a moderate inverse relationship between eGFR and fu.year. That is to say, for patient 162, eGFR decreases as time went on. The second model is less steep than the first because its extreme values were removed, and the analysis is similar as before. However, we can see that most of the measurements were taken during year 3, and judging by interval (3.0,3.5) alone it might not be accurate to say eGFR decreases with time. In my opinion further analysis can be conducted which concentrates around year 3-3.5 to inspect their relationship.
+
+```{r}
+egfr.regplots(223)
+```
+For patient 223, the confidence interval for the coefficient of fu.years includes 0 so we cannot reject the null hypothesis that the coefficient for fu.year is zero. There is a general downwards trend of eGFR with time, and with extreme values removed the second model indicates that for each unit increase in year, eGFR increases less than the first model.
+
+## Problem 2 (25 points)  
+
+The MDRD4 and CKD-EPI equations are two different ways of estimating the glomerular filtration rate (eGFR) in adults:
+$$\text{MDRD4} = 175 \times \text{Scr}^{-1.154} \times \text{Age}^{-0.203} [\times 0.742 \text{ if female}] [\times 1.212 \text{ if black}]$$,
+and
+$$\text{CKD-EPI} = 141 × \min(\text{Scr}/\kappa, 1)^{\alpha} × \max(\text{Scr}/\kappa, 1)^{-1.209}× 0.993^{\text{Age}} [×1.018 \text{ if female}] [×1.159 \text{if black}]$$, (1)
+
+where:
+* Scr is serum creatinine (in mg/dL)
+* $\kappa$ is 0.7 for females and 0.9 for males
+* $\alpha$ is -0.329 for females and -0.411 for males
+
+### Problem 2.a (7 points)
+
+For the scr.csv dataset available on Learn, examine a summary of the distribution of serum creatinine and report the inter-quartile range. If you suspect that some serum creatinine values may have been reported in µmol/L convert them to mg/dL by dividing by 88.42. Justify your choice of values to convert and examine the distribution of serum creatinine following any changes you have made.
+
+Answer:
+Same as before, we read in the data and convert it into a datatable format. We can use the summary function to get a basic understanding of scr's distribution.
+```{r}
+scr <- read.table("E:/Mae/EDIN/Biomedical Data Science/2_scr.csv",
+                  header = T, sep = ",", stringsAsFactors = T)
+scr.dt <- data.table(scr)
+head(scr.dt)
+summary(scr.dt$scr)
+```
+
+The interquartile range is $2.8-0.9=1.9$. We can see from the summary table that the maximum point here is 76 but the mean, the median and the first three quartiles are all below 10, therefore we can suspect that some of the values are reported in µmol/L. We sort the data by the scr column in descending order and inspect it. 
+
+```{r}
+scr.dt[order(scr, decreasing=T),]
+```
+
+According to medical sites (reference listed at end of report), a normal result of serum creatinine is 0.7 to 1.3 mg/dL (61.9 to 114.9 µmol/L) for men and 0.6 to 1.1 mg/dL (53 to 97.2 µmol/L) for women. Therefore, considering the possibility of abnormal results in this study, we can assume that the first four rows of scr are reported in µmol/L (also because starting at 18.10 and below the data become less sparse and more intensively distributed).   
+We convert these rows of data from µmol/L into mg/dL by dividing by 88.42, and inspect the data again. Now the interquartile range is $2.75-0.90=1.85$
+
+```{r}
+scr1.dt <- scr.dt %>% copy() %>% .[scr>18.1, scr:=scr/88.42]
+head(scr1.dt)
+summary(scr1.dt$scr)
+```
+
+### Problem 2.b (11 points)
+
+Compute the eGFR according to the two equations. Report (rounded to the second decimal place) mean and standard deviation of the two eGFR vectors and their Pearson correlation
+coefficient. Also report the same quantities according to strata of MDRD4 eGFR: 0-60, 60-90 and > 90. 
+
+Answer:
+```{r}
+# Calculate eGFR according to the MDRD4 equation
+scr1.dt[,MDRD4:= 175 * scr^(-1.154) * age^(-0.203)] %>%
+  .[,MDRD4:= ifelse(sex=="Female", MDRD4*0.742, MDRD4)] %>%
+  .[,MDRD4:= ifelse(ethnic=="Black", MDRD4*1.212, MDRD4)]
+
+# Calculate eGFR according to the CKD-EPI equation
+scr1.dt[,CKDEPI:= 141 * 0.993^(age)] %>%
+  .[,CKDEPI:= ifelse(sex=="Female", CKDEPI*(pmin(scr/0.7,1))^(-0.329)*(pmax(scr/0.7,1))^(-1.209),
+                     CKDEPI*(pmin(scr/0.9,1))^(-0.411)*(pmax(scr/0.9,1))^(-1.209))] %>%
+  .[,CKDEPI:= ifelse(sex=="Female", CKDEPI*1.018, CKDEPI)] %>%
+  .[,CKDEPI:= ifelse(ethnic=="Black", CKDEPI*1.159, CKDEPI)]
+
+scr1.dt
+
+# Calculate the mean and the standard deviation of the two eGFR vectors
+MD.mean <- mean(scr1.dt$MDRD4, na.rm=T) %>% round(.,2)
+CK.mean <- mean(scr1.dt$CKDEPI, na.rm=T) %>% round(.,2)
+MD.sd <- sd(scr1.dt$MDRD4, na.rm=T) %>% round(.,2)
+CK.sd <- sd(scr1.dt$CKDEPI, na.rm=T) %>% round(.,2)
+
+MD.mean; CK.mean
+MD.sd; CK.sd
+
+# Calculate the Pearson correlation coefficient
+with(scr1.dt, cor(MDRD4, CKDEPI, method = "pearson", use = "complete.obs")) %>%
+  round(.,2)
+```
+
+The mean of the MDRD4 equation's eGFR is 61.27 while the mean of the CKDEPI equation's eGFR is 59.65. The standard deviation of the MDRD4 equation's eGFR is 49.94 while the standard deviation of the CKDEPI equation's eGFR is 42.08. Their Pearson's correlation efficient is 0.95.
+
+```{r}
+# create bins according to the given strata
+bins2 <- c(0, 60, 90, max(scr1.dt$MDRD4, na.rm=T))
+
+# calculate each stratum's mean
+scr1.dt[, strataMDRD4:= cut(scr1.dt$MDRD4,bins2)] %>%
+  .[, round(mean(MDRD4),2), by=strataMDRD4]
+
+# calculate each stratum's standard deviation
+scr1.dt[, strataMDRD4:= cut(scr1.dt$MDRD4,bins2)] %>%
+  .[, round(sd(MDRD4),2), by=strataMDRD4] 
+```
+
+The mean of eGFR calculated by the MDRD4 method is respectively 26.14 for the 0-60 strata, 73.41 for the 60-90 strata, and 136.90 for the >90 strata.  
+The standard deviation of eGFR calculated by the MDRD4 method is respectively 17.21 for the 0-60 strata, 8.40 for the 60-90 strata, and 40.54 for the >90 strata.
+
+### Problem 2.c (7 points)
+
+Produce a scatter plot of the two eGFR vectors, and add vertical and horizontal lines (i.e.)
+corresponding to median, first and third quartiles. Is the relationship between the two eGFR
+equations linear? Justify your answer. 
+
+Answer:
+```{r}
+# We first calculate the medians, first and third quartiles of the two vectors
+MDRD4.qts <- quantile(scr1.dt$MDRD4,prob=c(.25,.5,.75),na.rm=TRUE)
+CKDEPI.qts <- quantile(scr1.dt$CKDEPI,prob=c(.25,.5,.75),na.rm=TRUE)
+
+# We then plot the scatterplot of the two vectors and add vertical and horizontal
+#lines to the plot
+plot(scr1.dt$MDRD4, scr1.dt$CKDEPI, main="Scatterplot of two eGFR vectors",
+     xlab="MDRD4's eFGR", ylab="CKD-EPI's eFGR")
+abline(v = MDRD4.qts, col = c("green", "blue","red"),
+                      lty = 2, lwd = 1)
+abline(h = MDRD4.qts, col = c("green", "blue","red"),
+                      lty = 2, lwd = 1)
+legend("topright", legend = c("1st quartile", "median", "3rd quartile"),
+       col = c("green", "blue", "red"), lty = 2, lwd = 1)
+```
+
+Looking at the scatter plot, the two vectors do seem to have a linear relationship, as most of the dots form a virtual straight line with negligible deviation in the tails, and their quartiles' intersection points land on the virtual line as well. Also, considering the Pearson correlation coefficient we calculated earlier which is 0.95, we can say that there's a strong relationship between the two variables. We can fit a linear regression model to check our hypothesis.
+
+```{r}
+summary(lm(scr1.dt$CKDEPI ~ scr1.dt$MDRD4))
+```
+
+From the model's summary we can confidently reject the null hypothesis and conclude that there is a linear relationship between the two eGFR vectors. We can say that as MDRD4 increases by 1, CKD-EPI increases by 0.80334. We get an adjusted R-squared of 0.9086, which means that 90.86% of the variance is explained by this linear model, indicating that we have a relatively well-fitted linear model.  
+In conclusion, we can say that the two eGFR vectors have a linear relationship.
+
+## Problem 3 (31 points)
+
+You have been provided with electronic health record data from a study cohort. Three CSV (Comma Separated Variable) files are provided on learn.
+
+The first file is a cohort description file cohort.csv file with fields:
+* id = study identifier
+* yob = year of birth
+* age = age at measurement
+* bp = systolic blood pressure
+* albumin = last known albuminuric status (categorical)
+* diabetes = diabetes status
+
+The second file lab1.csv is provided by a laboratory after measuring various biochemistry
+levels in the cohort blood samples. Notice that a separate lab identifier is used to anonymise
+results from the cohort. The year of birth is also provided as a check that the year of birth
+aligns between the two merged sets.
+* LABID = lab identifier
+* yob = year of birth
+* urea = blood urea
+* creatinine = serum creatinine
+* glucose = random blood glucose
+
+To link the two data files together, a third linker file linker.csv is provided. The linker
+file includes a LABID identifier and the cooresponding cohort id for each person in the cohort.
+
+
+### Problem 3.a (6 points)
+
+Using all three files provided on learn, load and merge to create a single data table based
+dataset cohort.dt. This will be used in your analysis. Perform assertion checks to ensure
+that all identifiers in cohort.csv have been accounted for in the final table and that any
+validation fields are consistent between sets. After the checks are complete, drop the
+identifier that originated from lab dataset LABID. Ensure that a single yob field remains and rename it.
+Ensure that the albumin field is converted to a factor and the ordering of the factor is
+1=“normo”,2=“micro”,3=“macro”.  
+
+Answer:  
+First we load the data files and convert them in to a data.table format.
+
+```{r}
+# load the data and in the process, convert strings to factors
+cohort0 <- read.table("E:/Mae/EDIN/Biomedical Data Science/3_cohort.csv",
+                  header = T, sep = ",", stringsAsFactors = T)
+lab1 <- read.table("E:/Mae/EDIN/Biomedical Data Science/3_lab1.csv",
+                  header = T, sep = ",", stringsAsFactors = T)
+linker <- read.table("E:/Mae/EDIN/Biomedical Data Science/3_linker.csv",
+                  header = T, sep = ",", stringsAsFactors = T)
+cohort0.dt <- data.table(cohort0)
+lab1.dt <- data.table(lab1)
+linker.dt <- data.table(linker)
+```
+
+To have a final single data set using the linker file, we first merge cohort0.dt with linker.dt to have each id correspond with labid, and then merge the resulting data table with lab.dt.  
+
+```{r}
+# merge the data
+cohort.dt <- merge(cohort0.dt, linker.dt, by="id", all=TRUE) %>% 
+  merge(., lab1.dt, by="LABID", all=TRUE)
+
+# have a view of what the merged dataset looks like
+head(cohort.dt)
+```
+
+To make sure that all identifiers in the cohort.csv (i.e. "id") is in the merged data table, we can check by the following:
+```{r}
+# id in cohort0.dt that are not in the merged cohort.dt
+cohort0.dt[!id %in% cohort.dt$id]$id 
+```
+
+The output is of length zero which means that all id in the cohort.csv are included in the merged data table cohort.dt.  
+To perform other validation checks, we can check if all identifiers in the lab1.csv (i.e., "LABID") is in the merged data table, or if the two yob variables have the same value for each patient. 
+
+```{r}
+# LABID in lab1.dt that are not in the merged cohort.dt
+lab1.dt[!LABID %in% cohort.dt$LABID]$LABID 
+
+# yob check
+all(cohort.dt[,yob.x==yob.y])
+```
+
+The first output is of length zero which means that all labid in the labid.csv are included in the merged data table cohort.dt. The second output means that the two yob vectors have the same values.  
+
+We now drop the "LABID" identifier and the redundant yob.y variable, and rename the remaining yob.x variable.
+
+```{r}
+cohort.dt <- cohort.dt[,LABID:=NULL] %>% # remove the LABID column
+  .[,yob.y:=NULL] %>% # remove the yob.y column
+  setnames(., "yob.x","yob") #rename the yob.x column
+```
+
+We now check that the albumin field is a factor and make sure the ordering of it is 1 = "normo", 2 = "micro", 3 = "macro".
+
+```{r}
+# check it is converted into a factor
+is.factor(cohort.dt$albumin)
+
+# reorder the levels of the factor and check the ordering
+cohort.dt[,albumin:=factor(albumin, levels = c("normo", "micro", "macro"))]
+levels(cohort.dt$albumin)
+```
+
+### Problem 3.b (10 points)
+
+Create a copy of the dataset where you will impute all missing values.
+Update any missing age fields using the year of birth, for all other continuous variables write a function called impute.to.mean and impute to mean, impute any categorical variable to the mode.
+Compare the distributions of the imputed and non-imputed variables and decide which ones to keep for further analysis. Justify your answer.  
+
+Answer:  
+First we impute the missing age field. We can compute which year this data table is based on by simply randomly selecting a patient and adding the yob and his/her age together. To compute the age value, we simply subtract the yob from the current year value.  
+We've noticed that some patients have their yob in decimals (e.g. 1967.517) and we leave them as it is because they could represent being born in the some time in the middle of the year and could potentially provide a more accurate analysis.
+
+```{r}
+# calculate current year
+currentyear <- cohort.dt[1,yob+age]
+currentyear
+
+# impute missing age
+cohort.imp.dt <- cohort.dt %>% copy() %>%
+  .[, age:= ifelse(is.na(age), currentyear - yob, age)]
+```
+
+Secondly, we write a function for continuous variables that imputes the mean of the variable.
+
+```{r}
+impute.to.mean <- function(x){
+  # a function that uses a vector as input and output a new vector whose 
+  # missing values have been imputed with the vector's mean
+  
+  # only applies to numerical columns
+  if (is.numeric(x) || is.integer(x)){
+    na.idx <- is.na(x) # save the indices of the missing values
+    x[na.idx] <- mean(x, na.rm=TRUE) # impute the mean
+  }
+  
+  #return the vector with the imputed values
+  return(x)
+}
+```
+
+Before we apply the function to our data table, we need to look at the data to ensure that there aren't any variables misclassified.
+
+```{r}
+str(cohort.imp.dt)
+```
+
+It can be seen from the above results that diabetes, which is a binary variable that takes the value 1 when the patient has diabetes and 0 when the patient does not, should be treated as a categorical variable while in fact it's listed as an integer variable. Therefore, we need to convert it into a factor variable before imputing.
+
+```{r}
+# convert into factor
+cohort.imp.dt[,diabetes:=factor(diabetes)]
+
+# select the continuous variables
+numcols <- cohort.imp.dt %>% 
+  select_if(function(col) is.numeric(col) | is.integer(col)) %>% 
+  colnames %>%
+  .[. != "yob"] # remove yob because we didn't impute yob
+
+# apply the impute.to.mean function to multiple columns
+cohort.imp.dt[, (numcols) := lapply(.SD, impute.to.mean),.SDcols = numcols] 
+```
+
+Lastly, we impute the missing values of the two categorical variables (diabetes and albumin) with the mode.
+
+```{r}
+impute.to.mode <- function(x){
+  # a function that uses a vector as input and output a new vector whose 
+  # missing values have been imputed with the vector's mode
+  
+  # only applies to categorical columns
+  if (is.factor(x)){
+    na.idx <- is.na(x) # save the indices of the missing values
+    
+    mode.x <- which.max(table(x)) %>% levels(x)[.]
+    
+    x[na.idx] <- mode.x # impute the mode
+  }
+  
+  #return the vector with the imputed values
+  return(x)
+}
+
+# select the factor variables
+faccols <- cohort.imp.dt %>% 
+  select_if(is.factor) %>% 
+  colnames
+
+# apply the impute.to.mode function to multiple columns
+cohort.imp.dt[, (faccols) := lapply(.SD, impute.to.mode),.SDcols = faccols]
+```
+
+To compare the distributions of the impute and the non-imputed variables, we can write a function which plots the variable's imputed and non-imputed histograms side by side for the numerical variables. For categorical variables, we can tabulate and compare.
+
+```{r}
+comparehist <- function(varname, dat1, dat2){
+  # A function that plots the distributions of the same variable 
+  # in an original dataset and an imputed dataset, where
+  # dat1 represents the original one and dat2 represents the imputed one
+  
+  par(mfrow=c(1,2))
+  
+  # plot the non-imputed histogram
+  hist(dat1[,varname], 
+     main = paste0("Non-imputed Histogram of ", varname), 
+     xlab = varname, cex.main = 0.8)
+  
+  #plot the imputed histogram
+  hist(dat2[,varname], 
+     main = paste0("Imputed Histogram of ", varname), 
+     xlab = varname, cex.main = 0.8)
+}
+
+sapply(numcols, comparehist, dat1 = data.frame(cohort.dt), dat2 = data.frame(cohort.imp.dt))
+```
+
+Judging by our imputation method, the imputed values of age should be accurate as it is based on logical mathematical calculation, so we would most definitely use the imputed variable for "age". For the other 4 numerical variables whose missing values are imputed by their means, there is a general tendency for the imputed histograms to have a higher density in the area around the mean.  
+
+For variable "bp" and "urea", the distributions look similar, possibly because they have fewer missing data and their data range is small, and we could consider using the imputed values.  
+
+However, for variable "creatinine" we can see that the data has a large range, and the mean is likely to be heavily influenced by the outliers at the right tail of the distribution, so in my opinion we should use the non-imputed data.  
+
+For variable "glucose", we can see that although the data range is not as large as that of "creatinine", the frequency in [100,150) (where the mean would be) has increased by nearly 50, probably because there is a large number of values missing, which could make a difference in the variable's distribution (e.g., kurtosis could change), so in my opinion it's best to use the non-imputed data here as well. 
+
+```{r}
+# compare the distributions of the categorical variables
+table(cohort.dt$diabetes); table(cohort.imp.dt$diabetes)
+table(cohort.dt$albumin); table(cohort.imp.dt$albumin)
+```
+
+From the output we can see that for variables that has few missing values like "diabetes", the distribution of the categories have changed very little; For "albumin", which has 245-199 = 46 missing values, this kind of mode imputation could lead to the "normo" category being over-represented and a biased data distribution. However, considering that the number of "normo" is almost twice as many as the second largest category "micro", the over-representation could be negligible. Also, for the sake of subsequent regression and likelihood analysis, we chose to ignore the possible bias here use the imputed values for "diabetes" and "albumin".
+
+In conclusion, I would suggest using the imputed values for "age", "bp", "diabetes", "albumin" and "urea", but not for "creatinine" and "glucose". 
+
+### Problem 3.c (6 points)
+
+Plot boxplots of potential predictors for diabetes grouped by cases and controls and use these to decide which predictors to keep for future analysis. For any categorical variables create a table instead. Justify your answers. 
+
+Answer:  
+Firstly, we update our data table by keeping some of the imputed vectors and some of the non-imputed vectors according to our analysis in 3.b.
+
+```{r}
+cohort1.dt <- cohort.imp.dt %>% copy() %>%
+  .[, creatinine:= cohort.dt$creatinine] %>%
+  .[, glucose:= cohort.dt$glucose]
+```
+
+To determine the potential predictors for diabetes, we can plot boxplots for all variables except "id", "yob" (since "yob" and "age" have essentially the same meaning) and "diabetes".
+
+```{r}
+# plot boxplots for continuous variables
+boxplot(age ~ diabetes, data=cohort1.dt, main="age stratified by diabetes")
+boxplot(bp ~ diabetes, data=cohort1.dt, main="blood pressure stratified by diabetes")
+boxplot(urea ~ diabetes, data=cohort1.dt, main="blood urea stratified by diabetes")
+boxplot(creatinine ~ diabetes, data=cohort1.dt, main="serum creatinine stratified by diabetes")
+boxplot(glucose ~ diabetes, data=cohort1.dt, main="glucose stratified by diabetes")
+```
+
+It can be seen that among the five variables, "glucose" and "age" have the most different distributions in subsets of diabetes (grouped by cases and controls). For a certain variable, having quite different values and different distributions in the two subgroups of diabetes would mean that it's more likely to predict the corresponding subgroup of diabetes accurately when given a certain value (as different subgroups correspond to different ranges, means, etc. of that variable). Thus, relatively speaking, "glucose" and "age" would make good predictors
+For "bp", "urea" and "creatinine", their distributions differ very little in the two subsets of diabetes, which would mean that they are probably not the best predictors for it.
+
+```{r}
+# create table for the categorical variable "albumin"
+cohort1.dt[diabetes==1,table(albumin)]
+cohort1.dt[diabetes==0,table(albumin)]
+```
+
+The first table represents albumin's distribution when patient has diabetes (case), and the second one represents its distribution when the patient doesn't (control). We can see a significant rise in the number of normos from the first table to the second, meaning that this variable has a quite different distribution in different groups of diabetes. Thus, "albumin" would make a great predictor. 
+
+### Problem 3.d (9 points)
+
+Use your findings from the previous exercise fit an appropriate model of diabetes with two predictors. Print a summary and explain the results as you would communicate it to a colleague with a medical rather than statistical background. 
+
+Answer:  
+From previous analysis in 3.c, we concluded that "age", "glucose" and "albumin" would potentially make good predictors of diabetes. To establish an appropriate model with two predictors, we can try to fit different models and choose the best one according to model summary statistics. Because diabetes is a binary variable that represents cases and control, we should fit GLMs with a binomial family assumption.
+```{r}
+r.ageglu <- glm(diabetes ~ age + glucose, data = cohort1.dt, family = "binomial")
+r.albglu <- glm(diabetes ~ albumin + glucose, data = cohort1.dt, family = "binomial")
+r.agealb <- glm(diabetes ~ age + albumin, data = cohort1.dt, family = "binomial")
+summary(r.ageglu)
+summary(r.albglu)
+summary(r.agealb)
+```
+Looking at the model summaries, we can see that as we chose the non-imputed values for some of the variables (glucose) earlier, different choice of variables can lead to different datasets for model-fitting (as it's fitted as a complete case analysis and thus different rows are deleted). Here, we cannot directly use the deviance or AICs to compare the latter two models, reg.albglu and reg.agealb because larger datasets tend to higher deviance and AIC. We can compare the first two models though, because the missing data are subject to glucose and thus the first two models have the same dataset. We can see that reg.ageglu has a smaller deviance than reg.albglu, which indicates that it's a better-fitted model.
+
+We could look at the significance of the coefficients, and the first model reg.ageglu's coefficients are also the the most significant. Therefore, we choose to the first model, which fits diabetes conditioning on age and glucose. 
+
+The positive coefficient of age tells us that one unit increase in age would increase the log odds of having diabetes by 0.047800. The positive coefficient of glucose tells us that one unit increase in glucose would increase the log odds of having diabetes by 0.018085. To better understand the magnitude of its effect, we should transform it into an odds ratio.
+```{r}
+exp(coef(r.ageglu)[2:3])
+```
+An odds ratio of 1.048961 indicates that one unit increase in age increases the odds of having diabetes by 4.896%, so the probability of having diabetes increases with age. An odds ratio of 1.018249 indicates that one unit increase in glucose increases the odds of having diabetes by 1.825%, so higher blood glucose value increases the probability of having diabetes.
+(It wouldn't be appropriate to calculate the baseline probability here because glucose and age can't be zero)
+
+## Problem 4 (19 points)
+
+### Problem 4.a. (9 points)
+
+Add a third predictor to the final model from problem 3, perform a likelihood ratio test to compare both models and report the p-value for the test. Is there any support for the additional term? Plot a ROC curve for both models and report the AUC, explain the results as you would communicate it to a colleague with a medical rather than statistical background.  
+
+Answer:  
+We add the variable we were considering but left out before in 3.d, "albumin", and fit a model as follows. 
+```{r}
+regr.aag <- glm(diabetes ~ age + albumin + glucose, data = cohort1.dt, family = "binomial")
+summary(regr.aag)
+```
+From the regression summary we can see that the coefficient for albuminmicro is quite significant, but it's not significant for albuminmacro. The deviance of the new model has decreased from the old model's 326.61 to 315.80, and the AIC has decreased from 332.61 to 325.68, which means that the new model has a better fit.  
+We perform the likelihood ratio test using the pchisq function, and the degree of freedom here is 2 because albumin is a categorised random variable with 3 levels and from the regression summary we can see that there are two more variables.
+```{r}
+# Perform likelihood ratio test
+pval <- pchisq(r.ageglu$deviance - regr.aag$deviance, df=2, lower.tail=FALSE)
+signif(pval, 2)
+```
+As the p-value is very small here (<0.01), we can confirm that the addition of the albumin term is very significant.  
+
+Now we plot the two ROC curves on one plot. To do that, we need to ensure the NA's indices for the glucose variable is also removed from the original dataset's diabetes variable (so that it has the same length as the model's fitted values).
+```{r}
+# Obtain the NA's indices
+missingidx <- which(is.na(cohort1.dt$glucose))
+
+# Plot the ROC curves
+roc(cohort1.dt$diabetes[-missingidx], r.ageglu$fitted.values, 
+    plot=TRUE, xlim = c(0,1))
+roc(cohort1.dt$diabetes[-missingidx], regr.aag$fitted.values, 
+    plot=TRUE, xlim = c(0,1), add=TRUE, col="red")
+```
+From the ROC plot we can directly see that the second model (with the red line) seems to have a larger area under the curve.  
+The first model with age and glucose has an AUC of 0.8457, which indicates that it has a pretty good discriminating power in separating cases and controls in diabetes. The second model with age, glucose and albumin has an AUC of 0.8594, which means that it has an even better discriminating power than the first model.   
+Therefore, we choose model regr.aag as there is sufficient support for the additional term "albumin".
+
+### Problem 4.b (10 points)
+
+Perform 10-folds cross-validation for your chosen model and report the mean cross-validated AUCs.  
+
+Answer:  
+
+```{r}
+# Remove the the NA's indices from the whole dataset to simplify the subsequent process
+cohort2.dt <- cohort1.dt %>% copy() %>%
+  .[-missingidx,]
+
+# Create the folds
+num.folds <- 10
+folds <- createFolds(cohort2.dt$diabetes, k=num.folds)
+
+# Initiatize the regr.cv, pred.cv and auc.cv lists
+regr.cv <- NULL
+pred.cv <- NULL
+auc.cv <- numeric(num.folds)
+
+# Perform the 10-fold cross validation
+for(f in 1:num.folds) {
+  # obtain the test indices for each fold
+  test.idx <- folds[[f]] 
+  
+  # use the training set to model
+  regr.cv[[f]] <- glm(diabetes ~ age + albumin + glucose, 
+                      data = cohort2.dt[-folds[[f]], ], family="binomial")
+  
+  # use the test set to predict
+  pred.cv[[f]] <- data.frame(obs = cohort2.dt$diabetes[test.idx],
+                             pred = predict(regr.cv[[f]], newdata = cohort2.dt, 
+                                            type = "response")[test.idx])
+  
+  # obtain the auc value for each fold
+  auc.cv[f] <- roc(obs ~ pred, data = pred.cv[[f]])$auc 
+}
+
+# Report the mean for cross-validated AUCs
+mean(auc.cv)
+```
+The mean for the cross-validated AUCs is 0.8575506, which is slightly smaller than the one for the whole model. 
+
+
+Reference: https://www.mountsinai.org/health-library/tests/creatinine-blood-test
